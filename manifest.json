@@ -1,0 +1,9 @@
+{
+  "id": "claudict",
+  "name": "Claudict",
+  "version": "1.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "A dictionary assistant powered by the local Claude Code CLI: translate English words and archive them into a Markdown table. Supports a bilingual (Chinese/English) UI.",
+  "author": "OrekiYuta",
+  "isDesktopOnly": true
+}

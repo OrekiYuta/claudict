@@ -1,0 +1,6 @@
+{
+  "language": "en",
+  "claudeCliPath": "",
+  "resultFilePath": "",
+  "prompt": "You are an English dictionary assistant. I will give you an English word or phrase.\nReply with ONLY its most common Chinese meaning. Requirements:\n1. Output only the Chinese meaning itself. No English word, no explanation, no examples, no surrounding punctuation.\n2. If there are multiple common senses, separate them with \"；\", at most 3.\n3. No prefix (such as \"Translation:\") and no pleasantries.\n\nThe content to translate is:"
+}
