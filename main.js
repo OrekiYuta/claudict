@@ -70,8 +70,15 @@ const TRANSLATIONS = {
     settingResetBtn: '恢复默认',
     fileSelected: (p) => `已选择归档文件：${p}`,
     // errors
-    errorPrefix: '错误：',
+    errorTitle: '翻译失败',
+    errorDetailLabel: '详细信息',
     cliNotFound: (p) => `找不到 claude CLI（路径：${p}）。请在设置中填写正确的 Claude CLI 路径。`,
+    errAuth: '身份认证失败或未登录。请在终端运行 `claude` 完成登录后重试。',
+    errQuota: '额度已用尽或触发速率限制。请稍后再试，或检查你的账户用量。',
+    errNetwork: '网络连接失败。请检查网络或代理设置后重试。',
+    errTimeout: '调用超时。Claude 响应时间过长，请稍后重试。',
+    errEmpty: 'Claude 未返回任何内容。请重试或检查提示词设置。',
+    errExit: (code) => `Claude 进程异常退出（退出码 ${code}）。`,
   },
   en: {
     pluginTitle: 'Claudict',
@@ -99,8 +106,15 @@ const TRANSLATIONS = {
     settingResetPrompt: 'Reset prompt',
     settingResetBtn: 'Restore default',
     fileSelected: (p) => `Archive file selected: ${p}`,
-    errorPrefix: 'Error: ',
+    errorTitle: 'Translation failed',
+    errorDetailLabel: 'Details',
     cliNotFound: (p) => `claude CLI not found (path: ${p}). Please set the correct Claude CLI path in settings.`,
+    errAuth: 'Authentication failed or not logged in. Run `claude` in a terminal to log in, then try again.',
+    errQuota: 'Quota exhausted or rate limited. Please try again later or check your account usage.',
+    errNetwork: 'Network connection failed. Please check your network or proxy settings and retry.',
+    errTimeout: 'The call timed out. Claude took too long to respond, please retry later.',
+    errEmpty: 'Claude returned no content. Please retry or check your prompt settings.',
+    errExit: (code) => `Claude process exited abnormally (exit code ${code}).`,
   },
 };
 
@@ -221,6 +235,30 @@ class ClaudictPlugin extends Plugin {
     return process.cwd();
   }
 
+  // Build an Error that carries a user-friendly reason plus the raw detail.
+  makeClaudeError(friendly, detail) {
+    const err = new Error(friendly);
+    err.friendly = friendly;                       // human-readable reason
+    err.detail = (detail || '').trim();            // raw CLI output (optional)
+    return err;
+  }
+
+  // Map raw stderr / exit code to a friendly, categorized reason.
+  classifyClaudeError(stderr, code) {
+    const text = (stderr || '').toLowerCase();
+    if (/(unauthor|not logged in|login|authenticat|forbidden|401|invalid api key|api key)/.test(text)) {
+      return this.t('errAuth');
+    }
+    if (/(quota|rate limit|too many requests|429|usage limit|overloaded|529)/.test(text)) {
+      return this.t('errQuota');
+    }
+    if (/(network|econn|etimedout|enotfound|dns|socket|proxy|fetch failed|getaddrinfo)/.test(text)) {
+      return this.t('errNetwork');
+    }
+    // Fallback: report the abnormal exit code.
+    return this.t('errExit')(code);
+  }
+
   // Spawn claude with the given args and resolve with stdout.
   runClaude(args) {
     return new Promise((resolve, reject) => {
@@ -238,14 +276,17 @@ class ClaudictPlugin extends Plugin {
       child.stderr.on('data', (d) => { stderr += d.toString(); });
       child.on('error', (err) => {
         if (err && err.code === 'ENOENT') {
-          reject(new Error(this.t('cliNotFound')(cliPath)));
+          reject(this.makeClaudeError(this.t('cliNotFound')(cliPath), ''));
         } else {
-          reject(err);
+          reject(this.makeClaudeError(err.message || String(err), ''));
         }
       });
       child.on('close', (code) => {
-        if (code === 0) resolve(stdout);
-        else reject(new Error(stderr.trim() || `claude exit code ${code}`));
+        if (code === 0) {
+          resolve(stdout);
+        } else {
+          reject(this.makeClaudeError(this.classifyClaudeError(stderr, code), stderr));
+        }
       });
     });
   }
@@ -254,7 +295,11 @@ class ClaudictPlugin extends Plugin {
   async translateViaClaude(word) {
     const fullPrompt = `${this.settings.prompt}\n${word}`;
     const out = await this.runClaude(['-p', fullPrompt]);
-    return out.trim();
+    const meaning = out.trim();
+    if (!meaning) {
+      throw this.makeClaudeError(this.t('errEmpty'), '');
+    }
+    return meaning;
   }
 
   // ---------- Write translation into the Markdown table (dedupe: update if exists) ----------
@@ -389,7 +434,7 @@ class ClaudictView extends ItemView {
         input.focus();
       } catch (err) {
         resultEl.empty();
-        resultEl.createDiv({ cls: 'claudict-error', text: t('errorPrefix') + (err.message || String(err)) });
+        this.renderError(resultEl, err);
       } finally {
         btn.disabled = false;
         btn.setText(t('translateBtn'));
@@ -405,6 +450,28 @@ class ClaudictView extends ItemView {
       }
     });
     window.setTimeout(() => input.focus(), 0);
+  }
+
+  // Render an error with a red highlighted title (the friendly reason) and,
+  // when available, the raw CLI output in a readable code block below.
+  renderError(el, err) {
+    const t = (k) => this.plugin.t(k);
+    const reason = err && (err.friendly || err.message) ? (err.friendly || err.message) : String(err);
+    const detail = err && err.detail ? err.detail : '';
+
+    const box = el.createDiv({ cls: 'claudict-error' });
+
+    const head = box.createDiv({ cls: 'claudict-error-head' });
+    head.createSpan({ cls: 'claudict-error-icon', text: '⚠' });
+    head.createSpan({ cls: 'claudict-error-title', text: t('errorTitle') });
+
+    box.createDiv({ cls: 'claudict-error-reason', text: reason });
+
+    if (detail && detail !== reason) {
+      const details = box.createEl('details', { cls: 'claudict-error-details' });
+      details.createEl('summary', { text: t('errorDetailLabel') });
+      details.createEl('pre', { cls: 'claudict-error-detail-pre', text: detail });
+    }
   }
 }
 
