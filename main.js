@@ -391,7 +391,9 @@ class ClaudictView extends ItemView {
     this.renderContent();
   }
 
-  async onClose() {}
+  async onClose() {
+    if (this._resultTimer) { clearTimeout(this._resultTimer); this._resultTimer = null; }
+  }
 
   // Full render (also called to refresh after a language switch).
   renderContent() {
@@ -415,11 +417,19 @@ class ClaudictView extends ItemView {
 
     const resultEl = el.createDiv({ cls: 'claudict-result' });
 
+    const showIdle = () => {
+      resultEl.empty();
+      resultEl.createDiv({ cls: 'claudict-idle', text: '(=^･ω･^=)' });
+    };
+
+    showIdle();
+
     const doTranslate = async () => {
       const word = input.value.trim();
       if (!word) { new Notice(t('inputWordFirst')); return; }
       btn.disabled = true;
       btn.setText(t('translating'));
+      if (this._resultTimer) { clearTimeout(this._resultTimer); this._resultTimer = null; }
       resultEl.empty();
       resultEl.createSpan({ text: t('callingClaude'), cls: 'claudict-loading' });
       try {
@@ -432,9 +442,11 @@ class ClaudictView extends ItemView {
         await this.plugin.appendTranslation(word, meaning);
         input.value = '';
         input.focus();
+        this._resultTimer = setTimeout(showIdle, 60000);
       } catch (err) {
         resultEl.empty();
         this.renderError(resultEl, err);
+        this._resultTimer = setTimeout(showIdle, 60000);
       } finally {
         btn.disabled = false;
         btn.setText(t('translateBtn'));

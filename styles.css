@@ -97,6 +97,15 @@
 
 .claudict-result { margin-top: 12px; }
 
+.claudict-idle {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 2em;
+  padding: 24px 0;
+  opacity: 0.7;
+}
+
 .claudict-result-card {
   border: 1px solid var(--background-modifier-border);
   border-radius: 8px;
