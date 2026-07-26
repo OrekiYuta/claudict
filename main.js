@@ -33,6 +33,7 @@ const DEFAULT_SETTINGS = {
   language: 'zh',                 // 'zh' | 'en' (UI language only)
   claudeCliPath: '',              // empty = auto-detect
   resultFilePath: 'Translations.md',
+  rotationIntervalSeconds: 5,
   prompt: DEFAULT_PROMPT,
 };
 
@@ -64,6 +65,8 @@ const TRANSLATIONS = {
     settingPickFileDesc: '点击按钮，通过搜索从已有的 Markdown 文件中快速选择。',
     settingPickBtn: '搜索并选择…',
     fuzzyPlaceholder: '输入关键字搜索 Markdown 文件…',
+    settingRotationInterval: '单词轮转间隔',
+    settingRotationIntervalDesc: '空闲状态下轮转显示已有单词的间隔时间，单位：秒。',
     settingPrompt: '翻译提示词',
     settingPromptDesc: '发送给 Claude 的提示词。单词会拼接在末尾。',
     settingResetPrompt: '重置提示词',
@@ -101,6 +104,8 @@ const TRANSLATIONS = {
     settingPickFileDesc: 'Click the button to quickly pick an existing Markdown file via search.',
     settingPickBtn: 'Search and select…',
     fuzzyPlaceholder: 'Type to search Markdown files…',
+    settingRotationInterval: 'Word rotation interval',
+    settingRotationIntervalDesc: 'Interval for rotating archived words while idle, in seconds.',
     settingPrompt: 'Translation prompt',
     settingPromptDesc: 'The prompt sent to Claude. The word is appended at the end.',
     settingResetPrompt: 'Reset prompt',
@@ -188,11 +193,35 @@ class ClaudictPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = (await this.loadData()) || {};
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    // Guard against empty strings persisted by older versions: an empty
+    // string would otherwise override the default via Object.assign, leaving
+    // the archive path blank and writing to an unexpected location.
+    if (!this.settings.resultFilePath || !this.settings.resultFilePath.trim()) {
+      this.settings.resultFilePath = DEFAULT_SETTINGS.resultFilePath;
+    }
+    if (!this.settings.prompt || !this.settings.prompt.trim()) {
+      this.settings.prompt = DEFAULT_SETTINGS.prompt;
+    }
+    if (this.settings.language !== 'en' && this.settings.language !== 'zh') {
+      this.settings.language = DEFAULT_SETTINGS.language;
+    }
+    const interval = Number(this.settings.rotationIntervalSeconds);
+    if (!Number.isFinite(interval) || interval <= 0) {
+      this.settings.rotationIntervalSeconds = DEFAULT_SETTINGS.rotationIntervalSeconds;
+    }
   }
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  getResultFilePath() {
+    let filePath = (this.settings.resultFilePath || '').trim() || 'Translations.md';
+    filePath = filePath.replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!/\.md$/i.test(filePath)) filePath += '.md';
+    return filePath;
   }
 
   async activateView() {
@@ -305,7 +334,9 @@ class ClaudictPlugin extends Plugin {
   // ---------- Write translation into the Markdown table (dedupe: update if exists) ----------
 
   async appendTranslation(word, meaning) {
-    const filePath = this.settings.resultFilePath || 'Translations.md';
+    // Normalize to a vault-relative POSIX path. Fall back to the default when
+    // the setting is blank so archiving never silently no-ops.
+    const filePath = this.getResultFilePath();
     const now = window.moment
       ? window.moment().format('YYYY-MM-DD HH:mm:ss')
       : new Date().toLocaleString();
@@ -366,11 +397,56 @@ class ClaudictPlugin extends Plugin {
 
     return { replaced, time: now };
   }
+
+  async readArchivedTranslations() {
+    const file = this.app.vault.getAbstractFileByPath(this.getResultFilePath());
+    if (!(file instanceof TFile)) return [];
+
+    const content = await this.app.vault.read(file);
+    const entries = [];
+    for (const rawLine of content.split('\n')) {
+      const line = rawLine.trim();
+      if (!line.startsWith('|')) continue;
+
+      const cells = splitMarkdownTableRow(line);
+      const word = cells[1];
+      const meaning = cells[2];
+      if (!word || !meaning) continue;
+      if (HEADER_FIRST_COLS.includes(word)) continue;
+      if (/^:?-{1,}:?$/.test(word)) continue;
+
+      entries.push({ word: unescapeCell(word), meaning: unescapeCell(meaning) });
+    }
+    return entries;
+  }
 }
 
 // Escape a Markdown table cell: collapse newlines and escape pipes.
 function escapeCell(text) {
   return String(text).replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').trim();
+}
+
+function unescapeCell(text) {
+  return String(text).replace(/\\\|/g, '|').trim();
+}
+
+function splitMarkdownTableRow(line) {
+  const cells = [];
+  let cell = '';
+  let escaped = false;
+  for (const ch of line) {
+    if (ch === '|' && !escaped) {
+      cells.push(cell.trim());
+      cell = '';
+      escaped = false;
+      continue;
+    }
+    cell += ch;
+    escaped = ch === '\\' && !escaped;
+    if (ch !== '\\') escaped = false;
+  }
+  cells.push(cell.trim());
+  return cells;
 }
 
 // ============================================================
@@ -393,10 +469,13 @@ class ClaudictView extends ItemView {
 
   async onClose() {
     if (this._resultTimer) { clearTimeout(this._resultTimer); this._resultTimer = null; }
+    this.stopIdleRotation();
   }
 
   // Full render (also called to refresh after a language switch).
   renderContent() {
+    this.stopIdleRotation();
+    if (this._resultTimer) { clearTimeout(this._resultTimer); this._resultTimer = null; }
     const container = this.contentEl;
     container.empty();
     container.addClass('claudict-container');
@@ -418,18 +497,22 @@ class ClaudictView extends ItemView {
     const resultEl = el.createDiv({ cls: 'claudict-result' });
 
     const showIdle = () => {
-      resultEl.empty();
-      resultEl.createDiv({ cls: 'claudict-idle', text: '(=^･ω･^=)' });
+      this.startIdleRotation(resultEl);
     };
 
     showIdle();
+
+    const stopResultTimers = () => {
+      if (this._resultTimer) { clearTimeout(this._resultTimer); this._resultTimer = null; }
+      this.stopIdleRotation();
+    };
 
     const doTranslate = async () => {
       const word = input.value.trim();
       if (!word) { new Notice(t('inputWordFirst')); return; }
       btn.disabled = true;
       btn.setText(t('translating'));
-      if (this._resultTimer) { clearTimeout(this._resultTimer); this._resultTimer = null; }
+      stopResultTimers();
       resultEl.empty();
       resultEl.createSpan({ text: t('callingClaude'), cls: 'claudict-loading' });
       try {
@@ -462,6 +545,43 @@ class ClaudictView extends ItemView {
       }
     });
     window.setTimeout(() => input.focus(), 0);
+  }
+
+  stopIdleRotation() {
+    this._idleToken = null;
+    if (this._idleTimer) { clearInterval(this._idleTimer); this._idleTimer = null; }
+  }
+
+  startIdleRotation(resultEl) {
+    this.stopIdleRotation();
+    const token = Symbol('idle');
+    this._idleToken = token;
+
+    resultEl.empty();
+    const idleEl = resultEl.createDiv({ cls: 'claudict-idle' });
+    const wordEl = idleEl.createDiv({ cls: 'claudict-idle-word' });
+    const meaningEl = idleEl.createDiv({ cls: 'claudict-idle-meaning' });
+
+    void this.plugin.readArchivedTranslations().then((entries) => {
+      if (this._idleToken !== token || !idleEl.isConnected || entries.length === 0) return;
+
+      let index = 0;
+      const renderEntry = () => {
+        const entry = entries[index];
+        wordEl.setText(entry.word);
+        meaningEl.setText(entry.meaning);
+      };
+
+      renderEntry();
+      this._idleTimer = setInterval(() => {
+        if (this._idleToken !== token || !idleEl.isConnected) {
+          this.stopIdleRotation();
+          return;
+        }
+        index = (index + 1) % entries.length;
+        renderEntry();
+      }, this.plugin.settings.rotationIntervalSeconds * 1000);
+    });
   }
 
   // Render an error with a red highlighted title (the friendly reason) and,
@@ -571,6 +691,23 @@ class ClaudictSettingTab extends PluginSettingTab {
             }).open();
           })
       );
+
+    new Setting(containerEl)
+      .setName(t('settingRotationInterval'))
+      .setDesc(t('settingRotationIntervalDesc'))
+      .addText((text) => {
+        text
+          .setPlaceholder(String(DEFAULT_SETTINGS.rotationIntervalSeconds))
+          .setValue(String(this.plugin.settings.rotationIntervalSeconds))
+          .onChange(async (value) => {
+            const interval = Number(value);
+            this.plugin.settings.rotationIntervalSeconds = Number.isFinite(interval) && interval > 0
+              ? interval
+              : DEFAULT_SETTINGS.rotationIntervalSeconds;
+            await this.plugin.saveSettings();
+            this.plugin.refreshAllViews();
+          });
+      });
 
     // Translation prompt
     new Setting(containerEl)
