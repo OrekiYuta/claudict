@@ -90,13 +90,13 @@ The plugin could not locate your Claude Code installation. This is common with N
 
 ### Table is not rendering
 
-A Markdown table needs a header row **and** a separator row to render. Claudict rebuilds the full table on every write, so simply translating one more word will repair a malformed file automatically.
+A Markdown table needs a header row **and** a separator row to render. Claudict rebuilds only its vocabulary table on each write. YAML frontmatter and any other content outside that table are preserved unchanged.
 
 ## How it works
 
 - The plugin runs `claude -p "<prompt>\n<word>"` as a child process with your vault as the working directory.
 - The default prompt instructs Claude to reply with **only** the Chinese meaning, so the output stays clean.
-- Results are parsed and written into the archive table, rebuilding it on each write to guarantee valid, renderable Markdown.
+- Results are parsed and written into the archive table. Claudict rebuilds only that table to keep it valid and renderable while preserving frontmatter and the rest of the Markdown file.
 
 ## License
 

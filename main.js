@@ -4,15 +4,13 @@ const { Plugin, ItemView, Notice, PluginSettingTab, Setting, TFile, FuzzySuggest
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { updateArchiveTable, splitMarkdownTableRow, unescapeCell } = require('./archive-table');
 
 // ============================================================
 // Constants
 // ============================================================
 
 const VIEW_TYPE_CLAUDICT = 'claudict-view';
-
-// Fixed English table headers for the archive file.
-const TABLE_HEADERS = ['English Word', 'Chinese Meaning', 'Query Time'];
 
 // First-column header labels treated as a header row (includes legacy Chinese
 // headers so old files get normalized to English headers).
@@ -347,55 +345,20 @@ class ClaudictPlugin extends Plugin {
       content = await this.app.vault.read(file);
     }
 
-    const header = `| ${TABLE_HEADERS[0]} | ${TABLE_HEADERS[1]} | ${TABLE_HEADERS[2]} |`;
-    const separator = '| --- | --- | --- |';
-    const escWord = escapeCell(word);
-
-    // Extract existing data rows (skip header, separator and non-table lines)
-    // so the table is rebuilt correctly regardless of the original content.
-    const dataRows = [];
-    for (const rawLine of content.split('\n')) {
-      const line = rawLine.trim();
-      if (!line.startsWith('|')) continue;             // skip non-table lines
-      const cells = line.split('|').map((c) => c.trim());
-      const firstCol = cells[1];
-      if (firstCol === undefined) continue;
-      if (HEADER_FIRST_COLS.includes(firstCol)) continue;  // skip header row
-      if (/^:?-{1,}:?$/.test(firstCol)) continue;      // skip separator row
-      dataRows.push(line);
-    }
-
-    const newRow = `| ${escWord} | ${escapeCell(meaning)} | ${now} |`;
-
-    // Dedupe: if the word already exists, remove its old row so the refreshed
-    // entry is re-inserted at the top (newest first).
-    let replaced = false;
-    for (let i = dataRows.length - 1; i >= 0; i--) {
-      const cells = dataRows[i].split('|').map((c) => c.trim());
-      const firstCol = cells[1];
-      if (firstCol && firstCol.toLowerCase() === escWord.toLowerCase()) {
-        dataRows.splice(i, 1);
-        replaced = true;
-      }
-    }
-
-    // Newest query goes to the top (right below the header).
-    dataRows.unshift(newRow);
-
-    // Always rebuild a complete, renderable table: header + separator + data rows.
-    const finalContent = [header, separator, ...dataRows].join('\n') + '\n';
+    // Rebuild only Claudict's table; preserve frontmatter and all other Markdown.
+    const result = updateArchiveTable(content, word, meaning, now);
 
     if (file instanceof TFile) {
-      await this.app.vault.modify(file, finalContent);
+      await this.app.vault.modify(file, result.content);
     } else {
       const dir = path.posix.dirname(filePath);
       if (dir && dir !== '.' && !this.app.vault.getAbstractFileByPath(dir)) {
         try { await this.app.vault.createFolder(dir); } catch (_) {}
       }
-      await this.app.vault.create(filePath, finalContent);
+      await this.app.vault.create(filePath, result.content);
     }
 
-    return { replaced, time: now };
+    return { replaced: result.replaced, time: now };
   }
 
   async readArchivedTranslations() {
@@ -419,34 +382,6 @@ class ClaudictPlugin extends Plugin {
     }
     return entries;
   }
-}
-
-// Escape a Markdown table cell: collapse newlines and escape pipes.
-function escapeCell(text) {
-  return String(text).replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').trim();
-}
-
-function unescapeCell(text) {
-  return String(text).replace(/\\\|/g, '|').trim();
-}
-
-function splitMarkdownTableRow(line) {
-  const cells = [];
-  let cell = '';
-  let escaped = false;
-  for (const ch of line) {
-    if (ch === '|' && !escaped) {
-      cells.push(cell.trim());
-      cell = '';
-      escaped = false;
-      continue;
-    }
-    cell += ch;
-    escaped = ch === '\\' && !escaped;
-    if (ch !== '\\') escaped = false;
-  }
-  cells.push(cell.trim());
-  return cells;
 }
 
 // ============================================================
