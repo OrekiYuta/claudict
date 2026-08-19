@@ -14,6 +14,7 @@ const VIEW_TYPE_CLAUDICT = 'claudict-view';
 // First-column header labels treated as a header row (includes legacy Chinese
 // headers so old files get normalized to English headers).
 const HEADER_FIRST_COLS = ['English Word', '英语单词'];
+const TABLE_HEADERS = ['English Word', 'Chinese Meaning', 'Query Time'];
 
 // Default prompt sent to Claude. The word is appended at the end.
 const DEFAULT_PROMPT = [
