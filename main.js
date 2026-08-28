@@ -1,9 +1,6 @@
 'use strict';
 
-const { Plugin, ItemView, Notice, PluginSettingTab, Setting, TFile, FuzzySuggestModal } = require('obsidian');
-const { spawn } = require('child_process');
-const fs = require('fs');
-const path = require('path');
+const { Plugin, ItemView, Notice, PluginSettingTab, Setting, TFile, FuzzySuggestModal, requestUrl } = require('obsidian');
 
 // ============================================================
 // Constants
@@ -16,7 +13,7 @@ const VIEW_TYPE_CLAUDICT = 'claudict-view';
 const HEADER_FIRST_COLS = ['English Word', '英语单词'];
 const TABLE_HEADERS = ['English Word', 'Chinese Meaning', 'Query Time'];
 
-// Default prompt sent to Claude. The word is appended at the end.
+// Default system prompt sent to the configured AI service.
 const DEFAULT_PROMPT = [
   'You are an English dictionary assistant. I will give you an English word or phrase.',
   'Reply with ONLY its most common Chinese meaning. Requirements:',
@@ -29,7 +26,11 @@ const DEFAULT_PROMPT = [
 
 const DEFAULT_SETTINGS = {
   language: 'zh',                 // 'zh' | 'en' (UI language only)
-  claudeCliPath: '',              // empty = auto-detect
+  apiBaseUrl: '',
+  apiKey: '',
+  apiQueryParams: '',
+  model: '',
+  availableModels: [],
   resultFilePath: 'Translations.md',
   rotationIntervalSeconds: 5,
   prompt: DEFAULT_PROMPT,
@@ -48,15 +49,26 @@ const TRANSLATIONS = {
     translatePlaceholder: '输入英文单词或短语…（回车翻译）',
     translateBtn: '翻译',
     translating: '翻译中…',
-    callingClaude: '正在调用 Claude…',
+    callingAi: '正在调用 AI…',
     inputWordFirst: '请输入要翻译的单词',
     // settings
     settingsTitle: 'Claudict 设置',
     settingLanguage: '界面语言',
     settingLanguageDesc: '切换插件界面的显示语言。',
-    settingCliPath: 'Claude CLI 路径',
-    settingCliPathDesc: '留空则自动检测。自动检测失败时，请填写 claude 可执行文件的完整路径。',
-    settingCliCurrent: '当前生效的 CLI 路径',
+    settingApiBaseUrl: 'API Base URL',
+    settingApiBaseUrlDesc: 'OpenAI 兼容接口的基础地址，例如 https://api.openai.com/v1。',
+    settingApiKey: 'API Key',
+    settingApiKeyDesc: '密钥将保存在此插件的本地 data.json 中。',
+    settingApiQueryParams: '附加查询参数',
+    settingApiQueryParamsDesc: '可选。填写 URL 查询字符串，例如 api-version=2025-03-01-preview。',
+    settingFetchModels: '模型列表',
+    settingFetchModelsDesc: '从 /models 拉取可用模型，成功后自动更新本地配置文件。',
+    settingFetchModelsBtn: '获取模型',
+    settingFetchingModelsBtn: '获取中…',
+    settingModel: 'AI 模型',
+    settingModelDesc: '选择已拉取并保存到本地配置的模型。',
+    settingModelEmpty: '请先获取模型',
+    modelsFetched: (count) => `已获取并保存 ${count} 个模型`,
     settingResultFile: '翻译结果归档文件',
     settingResultFileDesc: '翻译结果会以表格形式写入此 Markdown 文件（vault 内相对路径）。',
     settingPickFile: '选择归档文件',
@@ -66,20 +78,24 @@ const TRANSLATIONS = {
     settingRotationInterval: '单词轮转间隔',
     settingRotationIntervalDesc: '空闲状态下轮转显示已有单词的间隔时间，单位：秒。',
     settingPrompt: '翻译提示词',
-    settingPromptDesc: '发送给 Claude 的提示词。单词会拼接在末尾。',
+    settingPromptDesc: '作为 system 消息发送给 AI 的翻译提示词。',
     settingResetPrompt: '重置提示词',
     settingResetBtn: '恢复默认',
     fileSelected: (p) => `已选择归档文件：${p}`,
     // errors
     errorTitle: '翻译失败',
     errorDetailLabel: '详细信息',
-    cliNotFound: (p) => `找不到 claude CLI（路径：${p}）。请在设置中填写正确的 Claude CLI 路径。`,
-    errAuth: '身份认证失败或未登录。请在终端运行 `claude` 完成登录后重试。',
+    errConfigUrl: '请先在设置中填写 API Base URL。',
+    errConfigKey: '请先在设置中填写 API Key。',
+    errConfigModel: '请先获取并选择一个 AI 模型。',
+    errAuth: 'API Key 无效或没有访问权限。',
     errQuota: '额度已用尽或触发速率限制。请稍后再试，或检查你的账户用量。',
     errNetwork: '网络连接失败。请检查网络或代理设置后重试。',
-    errTimeout: '调用超时。Claude 响应时间过长，请稍后重试。',
-    errEmpty: 'Claude 未返回任何内容。请重试或检查提示词设置。',
-    errExit: (code) => `Claude 进程异常退出（退出码 ${code}）。`,
+    errNotFound: '接口不存在。请检查 Base URL 是否正确以及是否包含 /v1。',
+    errServer: 'AI 服务暂时不可用，请稍后重试。',
+    errBadResponse: 'AI 服务返回了不兼容的数据格式。',
+    errEmpty: 'AI 未返回任何内容。请重试或检查提示词设置。',
+    errHttp: (code) => `AI 请求失败（HTTP ${code}）。`,
   },
   en: {
     pluginTitle: 'Claudict',
@@ -88,14 +104,25 @@ const TRANSLATIONS = {
     translatePlaceholder: 'Enter an English word or phrase… (Enter to translate)',
     translateBtn: 'Translate',
     translating: 'Translating…',
-    callingClaude: 'Calling Claude…',
+    callingAi: 'Calling AI…',
     inputWordFirst: 'Please enter a word to translate',
     settingsTitle: 'Claudict Settings',
     settingLanguage: 'Interface language',
     settingLanguageDesc: 'Switch the display language of the plugin UI.',
-    settingCliPath: 'Claude CLI path',
-    settingCliPathDesc: 'Leave empty to auto-detect. If auto-detection fails, enter the full path to the claude executable.',
-    settingCliCurrent: 'Current effective CLI path',
+    settingApiBaseUrl: 'API Base URL',
+    settingApiBaseUrlDesc: 'Base URL of an OpenAI-compatible API, such as https://api.openai.com/v1.',
+    settingApiKey: 'API key',
+    settingApiKeyDesc: 'The key is stored in this plugin\'s local data.json file.',
+    settingApiQueryParams: 'Additional query parameters',
+    settingApiQueryParamsDesc: 'Optional URL query string, such as api-version=2025-03-01-preview.',
+    settingFetchModels: 'Model list',
+    settingFetchModelsDesc: 'Fetch models from /models and save the updated list to the local configuration file.',
+    settingFetchModelsBtn: 'Fetch models',
+    settingFetchingModelsBtn: 'Fetching…',
+    settingModel: 'AI model',
+    settingModelDesc: 'Select a model fetched and saved in the local configuration.',
+    settingModelEmpty: 'Fetch models first',
+    modelsFetched: (count) => `Fetched and saved ${count} models`,
     settingResultFile: 'Translation archive file',
     settingResultFileDesc: 'Translations are written as a table to this Markdown file (vault-relative path).',
     settingPickFile: 'Choose archive file',
@@ -105,19 +132,23 @@ const TRANSLATIONS = {
     settingRotationInterval: 'Word rotation interval',
     settingRotationIntervalDesc: 'Interval for rotating archived words while idle, in seconds.',
     settingPrompt: 'Translation prompt',
-    settingPromptDesc: 'The prompt sent to Claude. The word is appended at the end.',
+    settingPromptDesc: 'The translation prompt sent to the AI as a system message.',
     settingResetPrompt: 'Reset prompt',
     settingResetBtn: 'Restore default',
     fileSelected: (p) => `Archive file selected: ${p}`,
     errorTitle: 'Translation failed',
     errorDetailLabel: 'Details',
-    cliNotFound: (p) => `claude CLI not found (path: ${p}). Please set the correct Claude CLI path in settings.`,
-    errAuth: 'Authentication failed or not logged in. Run `claude` in a terminal to log in, then try again.',
+    errConfigUrl: 'Set the API Base URL in settings first.',
+    errConfigKey: 'Set the API key in settings first.',
+    errConfigModel: 'Fetch and select an AI model first.',
+    errAuth: 'The API key is invalid or does not have access.',
     errQuota: 'Quota exhausted or rate limited. Please try again later or check your account usage.',
     errNetwork: 'Network connection failed. Please check your network or proxy settings and retry.',
-    errTimeout: 'The call timed out. Claude took too long to respond, please retry later.',
-    errEmpty: 'Claude returned no content. Please retry or check your prompt settings.',
-    errExit: (code) => `Claude process exited abnormally (exit code ${code}).`,
+    errNotFound: 'The endpoint was not found. Check the Base URL and whether it includes /v1.',
+    errServer: 'The AI service is temporarily unavailable. Please try again later.',
+    errBadResponse: 'The AI service returned an incompatible response.',
+    errEmpty: 'The AI returned no content. Please retry or check your prompt settings.',
+    errHttp: (code) => `AI request failed (HTTP ${code}).`,
   },
 };
 
@@ -205,6 +236,12 @@ class ClaudictPlugin extends Plugin {
     if (this.settings.language !== 'en' && this.settings.language !== 'zh') {
       this.settings.language = DEFAULT_SETTINGS.language;
     }
+    if (!Array.isArray(this.settings.availableModels)) {
+      this.settings.availableModels = [];
+    }
+    this.settings.availableModels = [...new Set(this.settings.availableModels
+      .filter((id) => typeof id === 'string' && id.trim())
+      .map((id) => id.trim()))].sort();
     const interval = Number(this.settings.rotationIntervalSeconds);
     if (!Number.isFinite(interval) || interval <= 0) {
       this.settings.rotationIntervalSeconds = DEFAULT_SETTINGS.rotationIntervalSeconds;
@@ -232,99 +269,108 @@ class ClaudictPlugin extends Plugin {
     workspace.revealLeaf(leaf);
   }
 
-  // ---------- Claude CLI ----------
+  // ---------- OpenAI-compatible API ----------
 
-  // Resolve the claude executable path: setting first, then common locations, then PATH.
-  resolveClaudeCliPath() {
-    if (this.settings.claudeCliPath && this.settings.claudeCliPath.trim()) {
-      return this.settings.claudeCliPath.trim();
-    }
-    const home = process.env.USERPROFILE || process.env.HOME || '';
-    const candidates = [
-      path.join(home, '.local', 'bin', 'claude.exe'),
-      path.join(home, '.local', 'bin', 'claude'),
-      path.join(home, 'AppData', 'Local', 'Claude', 'claude.exe'),
-      '/usr/local/bin/claude',
-      '/opt/homebrew/bin/claude',
-    ];
-    for (const c of candidates) {
-      try { if (fs.existsSync(c)) return c; } catch (_) {}
-    }
-    return process.platform === 'win32' ? 'claude.exe' : 'claude';
-  }
-
-  // Absolute path of the vault on disk (used as the CLI working directory).
-  getVaultBasePath() {
-    const adapter = this.app.vault.adapter;
-    if (adapter && typeof adapter.getBasePath === 'function') {
-      return adapter.getBasePath();
-    }
-    return process.cwd();
-  }
-
-  // Build an Error that carries a user-friendly reason plus the raw detail.
-  makeClaudeError(friendly, detail) {
+  makeApiError(friendly, detail) {
     const err = new Error(friendly);
-    err.friendly = friendly;                       // human-readable reason
-    err.detail = (detail || '').trim();            // raw CLI output (optional)
+    err.friendly = friendly;
+    err.detail = (detail || '').trim();
     return err;
   }
 
-  // Map raw stderr / exit code to a friendly, categorized reason.
-  classifyClaudeError(stderr, code) {
-    const text = (stderr || '').toLowerCase();
-    if (/(unauthor|not logged in|login|authenticat|forbidden|401|invalid api key|api key)/.test(text)) {
-      return this.t('errAuth');
+  getApiUrl(endpoint) {
+    const baseUrl = (this.settings.apiBaseUrl || '').trim();
+    if (!baseUrl) throw this.makeApiError(this.t('errConfigUrl'), '');
+    let url;
+    try {
+      url = new URL(`${baseUrl.replace(/\/+$/, '')}/${endpoint.replace(/^\/+/, '')}`);
+    } catch (_) {
+      throw this.makeApiError(this.t('errConfigUrl'), '');
     }
-    if (/(quota|rate limit|too many requests|429|usage limit|overloaded|529)/.test(text)) {
-      return this.t('errQuota');
-    }
-    if (/(network|econn|etimedout|enotfound|dns|socket|proxy|fetch failed|getaddrinfo)/.test(text)) {
-      return this.t('errNetwork');
-    }
-    // Fallback: report the abnormal exit code.
-    return this.t('errExit')(code);
+    const query = new URLSearchParams((this.settings.apiQueryParams || '').trim().replace(/^\?/, ''));
+    for (const [key, value] of query) url.searchParams.set(key, value);
+    return url.toString();
   }
 
-  // Spawn claude with the given args and resolve with stdout.
-  runClaude(args) {
-    return new Promise((resolve, reject) => {
-      const cliPath = this.resolveClaudeCliPath();
-      const child = spawn(cliPath, args, {
-        cwd: this.getVaultBasePath(),
-        env: process.env,
-        windowsHide: true,
-        // Close stdin so `claude -p` does not wait for standard input.
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let stdout = '';
-      let stderr = '';
-      child.stdout.on('data', (d) => { stdout += d.toString(); });
-      child.stderr.on('data', (d) => { stderr += d.toString(); });
-      child.on('error', (err) => {
-        if (err && err.code === 'ENOENT') {
-          reject(this.makeClaudeError(this.t('cliNotFound')(cliPath), ''));
-        } else {
-          reject(this.makeClaudeError(err.message || String(err), ''));
-        }
-      });
-      child.on('close', (code) => {
-        if (code === 0) {
-          resolve(stdout);
-        } else {
-          reject(this.makeClaudeError(this.classifyClaudeError(stderr, code), stderr));
-        }
-      });
+  getApiHeaders() {
+    const apiKey = (this.settings.apiKey || '').trim();
+    if (!apiKey) throw this.makeApiError(this.t('errConfigKey'), '');
+    return { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+  }
+
+  extractApiError(response) {
+    const message = response?.json?.error?.message || response?.json?.message || response?.text || '';
+    return String(message).trim().slice(0, 1000);
+  }
+
+  async apiRequest(options) {
+    try {
+      const response = await requestUrl(options);
+      if (response.status < 200 || response.status >= 300) {
+        throw this.makeApiError(this.classifyApiError(response.status), this.extractApiError(response));
+      }
+      return response;
+    } catch (err) {
+      if (err?.friendly) throw err;
+      const status = Number(err?.status);
+      if (Number.isFinite(status) && status > 0) {
+        throw this.makeApiError(this.classifyApiError(status), this.extractApiError(err));
+      }
+      throw this.makeApiError(this.t('errNetwork'), err?.message || String(err));
+    }
+  }
+
+  async fetchModels() {
+    const response = await this.apiRequest({
+      url: this.getApiUrl('models'),
+      method: 'GET',
+      headers: this.getApiHeaders(),
+      throw: false,
     });
+    const data = response.json?.data;
+    if (!Array.isArray(data)) throw this.makeApiError(this.t('errBadResponse'), 'Missing data array in /models response.');
+    const models = [...new Set(data
+      .map((item) => item?.id)
+      .filter((id) => typeof id === 'string' && id.trim())
+      .map((id) => id.trim()))].sort();
+    if (models.length === 0) throw this.makeApiError(this.t('errBadResponse'), 'The /models response contained no model IDs.');
+    this.settings.availableModels = models;
+    if (!models.includes(this.settings.model)) this.settings.model = models[0];
+    await this.saveSettings();
+    return models;
   }
 
-  // One-shot translation via `claude -p`.
-  async translateViaClaude(word) {
-    const fullPrompt = `${this.settings.prompt}\n${word}`;
-    const out = await this.runClaude(['-p', fullPrompt]);
-    const meaning = out.trim();
+  classifyApiError(status) {
+    if (status === 401 || status === 403) return this.t('errAuth');
+    if (status === 404) return this.t('errNotFound');
+    if (status === 429) return this.t('errQuota');
+    if (status >= 500) return this.t('errServer');
+    return this.t('errHttp')(status);
+  }
+
+  async translateViaApi(word) {
+    const model = (this.settings.model || '').trim();
+    if (!model) throw this.makeApiError(this.t('errConfigModel'), '');
+    const response = await this.apiRequest({
+      url: this.getApiUrl('chat/completions'),
+      method: 'POST',
+      headers: this.getApiHeaders(),
+      contentType: 'application/json',
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: this.settings.prompt },
+          { role: 'user', content: word },
+        ],
+        stream: false,
+      }),
+      throw: false,
+    });
+    const content = response.json?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string') throw this.makeApiError(this.t('errBadResponse'), 'Missing choices[0].message.content.');
+    const meaning = content.trim();
     if (!meaning) {
-      throw this.makeClaudeError(this.t('errEmpty'), '');
+      throw this.makeApiError(this.t('errEmpty'), '');
     }
     return meaning;
   }
@@ -351,7 +397,8 @@ class ClaudictPlugin extends Plugin {
     if (file instanceof TFile) {
       await this.app.vault.modify(file, result.content);
     } else {
-      const dir = path.posix.dirname(filePath);
+      const separatorIndex = filePath.lastIndexOf('/');
+      const dir = separatorIndex === -1 ? '.' : filePath.slice(0, separatorIndex);
       if (dir && dir !== '.' && !this.app.vault.getAbstractFileByPath(dir)) {
         try { await this.app.vault.createFolder(dir); } catch (_) {}
       }
@@ -541,9 +588,9 @@ class ClaudictView extends ItemView {
       btn.setText(t('translating'));
       stopResultTimers();
       resultEl.empty();
-      resultEl.createSpan({ text: t('callingClaude'), cls: 'claudict-loading' });
+      resultEl.createSpan({ text: t('callingAi'), cls: 'claudict-loading' });
       try {
-        const meaning = await this.plugin.translateViaClaude(word);
+        const meaning = await this.plugin.translateViaApi(word);
         resultEl.empty();
         const card = resultEl.createDiv({ cls: 'claudict-result-card' });
         card.createDiv({ cls: 'claudict-result-word', text: word });
@@ -612,7 +659,7 @@ class ClaudictView extends ItemView {
   }
 
   // Render an error with a red highlighted title (the friendly reason) and,
-  // when available, the raw CLI output in a readable code block below.
+  // when available, the sanitized API error in a readable code block below.
   renderError(el, err) {
     const t = (k) => this.plugin.t(k);
     const reason = err && (err.friendly || err.message) ? (err.friendly || err.message) : String(err);
@@ -667,23 +714,79 @@ class ClaudictSettingTab extends PluginSettingTab {
         });
       });
 
-    // Claude CLI path
+    // OpenAI-compatible API connection
     new Setting(containerEl)
-      .setName(t('settingCliPath'))
-      .setDesc(t('settingCliPathDesc'))
+      .setName(t('settingApiBaseUrl'))
+      .setDesc(t('settingApiBaseUrlDesc'))
       .addText((text) => {
         text
-          .setPlaceholder(this.plugin.resolveClaudeCliPath())
-          .setValue(this.plugin.settings.claudeCliPath)
+          .setPlaceholder('https://api.openai.com/v1')
+          .setValue(this.plugin.settings.apiBaseUrl)
           .onChange(async (value) => {
-            this.plugin.settings.claudeCliPath = value;
+            this.plugin.settings.apiBaseUrl = value.trim();
             await this.plugin.saveSettings();
           });
       });
 
     new Setting(containerEl)
-      .setName(t('settingCliCurrent'))
-      .setDesc(this.plugin.resolveClaudeCliPath());
+      .setName(t('settingApiKey'))
+      .setDesc(t('settingApiKeyDesc'))
+      .addText((text) => {
+        text
+          .setPlaceholder('sk-...')
+          .setValue(this.plugin.settings.apiKey)
+          .onChange(async (value) => {
+            this.plugin.settings.apiKey = value.trim();
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.type = 'password';
+        text.inputEl.autocomplete = 'off';
+      });
+
+    new Setting(containerEl)
+      .setName(t('settingApiQueryParams'))
+      .setDesc(t('settingApiQueryParamsDesc'))
+      .addText((text) => {
+        text
+          .setPlaceholder('api-version=2025-03-01-preview')
+          .setValue(this.plugin.settings.apiQueryParams)
+          .onChange(async (value) => {
+            this.plugin.settings.apiQueryParams = value.trim();
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName(t('settingFetchModels'))
+      .setDesc(t('settingFetchModelsDesc'))
+      .addButton((btn) => btn
+        .setButtonText(t('settingFetchModelsBtn'))
+        .setCta()
+        .onClick(async () => {
+          btn.setDisabled(true).setButtonText(t('settingFetchingModelsBtn'));
+          try {
+            const models = await this.plugin.fetchModels();
+            new Notice(t('modelsFetched')(models.length));
+            this.display();
+          } catch (err) {
+            new Notice(err?.friendly || err?.message || String(err));
+            btn.setDisabled(false).setButtonText(t('settingFetchModelsBtn'));
+          }
+        }));
+
+    new Setting(containerEl)
+      .setName(t('settingModel'))
+      .setDesc(t('settingModelDesc'))
+      .addDropdown((dd) => {
+        const models = this.plugin.settings.availableModels;
+        if (models.length === 0) dd.addOption('', t('settingModelEmpty'));
+        for (const model of models) dd.addOption(model, model);
+        dd.setValue(this.plugin.settings.model);
+        dd.onChange(async (value) => {
+          this.plugin.settings.model = value;
+          await this.plugin.saveSettings();
+        });
+      });
 
     // Archive file (text input)
     new Setting(containerEl)
